@@ -1,8 +1,8 @@
 // ==UserScript==
-// @name         Team Sonic - Definitive Suite (v21.2 - Arrival Timers)
+// @name         Team Sonic - Definitive Suite (v22.1 - Notification Fix)
 // @namespace    http://tampermonkey.net/
-// @version      21.2
-// @description  [FAILSAFE + TIMERS] Final version with "arrived ago" timers and robust error handling for API failures.
+// @version      22.1
+// @description  [NOTIFICATION FIX] Final version with a proactive, multi-stage notification system for key operational events.
 // @author       Rh. | Team Sonic (Creative AI Build)
 // @match        https://eye.delhivery.com/*
 // @connect      api.mapbox.com
@@ -10,6 +10,7 @@
 // @grant        GM_xmlhttpRequest
 // @grant        GM_setValue
 // @grant        GM_getValue
+// @grant        GM_notification
 // ==/UserScript==
 
 (function() {
@@ -20,7 +21,7 @@
     const HUBLI_COORDS = '75.14236961256525,15.288102693806877';
     const BAYS_AVAILABLE = 3;
     const UNLOAD_RATE_PER_HOUR_PER_BAY = 350;
-    const HUB_UNLOAD_RATE_PER_HOUR = BAYS_AVAILABLE * UNLOAD_RATE_PER_HOUR_PER_BAY; // = 1050
+    const HUB_UNLOAD_RATE_PER_HOUR = BAYS_AVAILABLE * UNLOAD_RATE_PER_HOUR_PER_BAY;
     const MIX_BAG_PROCESS_RATE_PER_HOUR = 3000;
     const SHIFT_BREAK_HOURS = 1;
     const PREP_BUFFER_MINS = 30;
@@ -35,6 +36,7 @@
     // --- STATE ---
     let activeTimers = { inbound: [], modal: [], insights: [] };
     let insightsHeaderInterval = null;
+    let notifiedVehicles = {}; // For tracking notifications
 
     // --- INITIALIZATION ---
     const initialize = () => {
@@ -102,7 +104,7 @@
         }
         modal.innerHTML = `<div class="modal-overlay"></div><div class="modal-content"><div class="modal-header"><h2>Hubli Inbound Vehicles</h2><div class="modal-sync-info">Last synced: ${syncInfo}</div></div><button class="close-btn">&times;</button><div class="modal-body"><h3 class="section-title no-gps-title">No GPS (Est. ETA)</h3><table><thead><tr><th>Vehicle</th><th>Origin</th><th>Load</th><th>Mixed Bags</th><th>Countdown</th><th>Action</th></tr></thead><tbody>${noGpsHtml||'<tr><td colspan=6>None</td></tr>'}</tbody></table><h3 class="section-title">Live GPS</h3><table><thead><tr><th>Vehicle</th><th>Origin</th><th>Load</th><th>Mixed Bags</th><th>Countdown</th><th>Action</th></tr></thead><tbody>${gpsHtml||'<tr><td colspan=6>None</td></tr>'}</tbody></table></div><div class="modal-footer"><p>Designed & Crafted by Rh. | for ⚡ Team Sonic - Hubli (for internal use only)</p></div></div>`;
         document.body.appendChild(modal);
-        vehicleNumbers.forEach(n => { const d = storedData[n]; const arrivalTime = d.hasGps ? d.liveArrivalTime : d.estimatedArrivalTime; if (arrivalTime) startTickingCountdown(modal.querySelector(`#countdown-${n}`), new Date(arrivalTime), activeTimers.modal); });
+        vehicleNumbers.forEach(n => { const d = storedData[n]; startTickingCountdown(modal.querySelector(`#countdown-${n}`), d, n, activeTimers.modal); });
         modal.querySelector('.close-btn').onclick = () => { activeTimers.modal.forEach(clearInterval); modal.remove(); };
         modal.querySelectorAll('.complete-btn').forEach(btn => btn.onclick = () => markAsComplete(btn.dataset.vehicleNum));
     }
@@ -153,27 +155,33 @@
         const btn = document.querySelector('#team-sonic-saver-container .saver');
         btn.textContent = 'Enhancing & Saving...'; btn.disabled = true;
         activeTimers.inbound.forEach(clearInterval); activeTimers.inbound = [];
+        notifiedVehicles = {}; // Reset notification tracking on new sync
+
         let storedData = JSON.parse(await GM_getValue('inboundVehicleData', '{}'));
         const rows = Array.from(table.querySelectorAll('tbody tr'));
         const vehicles = (await Promise.all(rows.map(fetchAndProcessVehicleData))).filter(v => v !== null);
         vehicles.forEach(v => { storedData[v.vehicleNumber] = { hasGps: v.hasGps, liveArrivalTime: v.hasGps ? v.liveArrivalTime.toISOString() : null, estimatedArrivalTime: !v.hasGps ? v.estimatedArrivalTime.toISOString() : null, originFacility: v.loadData.originFacility, totalLoad: v.loadData.totalLoad, mixedBagPkgCountForAlert: v.loadData.mixedBagPkgCountForAlert, savedAt: new Date().toISOString() }; });
         await GM_setValue('inboundVehicleData', JSON.stringify(storedData));
         await GM_setValue('lastSyncTimestamp', new Date().toISOString());
-        renderInboundUI(table, vehicles.filter(v => v.hasGps), vehicles.filter(v => !v.hasGps));
+
+        triggerPostSyncNotification(storedData); // <-- NOTIFICATION TRIGGER
+        renderInboundUI(table, vehicles);
+
         btn.textContent = 'Data Enhanced & Saved!';
         setTimeout(() => { btn.disabled = false; btn.textContent = 'Team Sonic: Enhance Incoming Data'; }, 3000);
     }
-    function renderInboundUI(table, gpsVehicles, noGpsVehicles) {
-        gpsVehicles.sort((a, b) => a.liveArrivalTime - b.liveArrivalTime);
-        noGpsVehicles.sort((a, b) => a.estimatedArrivalTime - b.estimatedArrivalTime);
+    function renderInboundUI(table, allVehicles) {
+        const gpsVehicles = allVehicles.filter(v => v.hasGps).sort((a,b) => a.liveArrivalTime - b.liveArrivalTime);
+        const noGpsVehicles = allVehicles.filter(v => !v.hasGps).sort((a,b) => a.estimatedArrivalTime - b.estimatedArrivalTime);
+
         table.querySelector('tbody').innerHTML = '';
         let noGpsContainer = document.getElementById('no-gps-container');
         if (!noGpsContainer) { noGpsContainer = document.createElement('div'); noGpsContainer.id = 'no-gps-container'; table.parentNode.insertBefore(noGpsContainer, table); }
         let noGpsHtml = '';
         noGpsVehicles.forEach(v => noGpsHtml += v.rowElement.outerHTML);
         noGpsContainer.innerHTML = `<h3 class="section-title no-gps-title">Vehicles without GPS</h3><table class="table_custom_1">${table.querySelector('thead').outerHTML}<tbody>${noGpsHtml}</tbody></table>`;
-        noGpsVehicles.forEach((v, i) => startTickingCountdown(noGpsContainer.querySelectorAll('tbody tr')[i].cells[3], v.estimatedArrivalTime, activeTimers.inbound));
-        gpsVehicles.forEach(v => { table.querySelector('tbody').appendChild(v.rowElement); startTickingCountdown(v.etaCell, v.liveArrivalTime, activeTimers.inbound); });
+        noGpsVehicles.forEach((v, i) => startTickingCountdown(noGpsContainer.querySelectorAll('tbody tr')[i].cells[3], v.data, v.vehicleNumber, activeTimers.inbound));
+        gpsVehicles.forEach(v => { table.querySelector('tbody').appendChild(v.rowElement); startTickingCountdown(v.etaCell, v.data, v.vehicleNumber, activeTimers.inbound); });
     }
     async function fetchAndProcessVehicleData(row) {
         try {
@@ -183,6 +191,7 @@
             const mixedStr = cells[6].textContent || "";
             const loadData = { originFacility: cells[2].textContent.trim(), totalLoad: (parseInt(cells[5].textContent,10)||0)+(parseInt(cells[7].textContent,10)||0)+(parseInt(mixedStr,10)||0), mixedBagPkgCountForAlert: (mixedStr.match(/\((\d+)\)/)?parseInt(mixedStr.match(/\((\d+)\)/)[1],10):0) };
             const mapLink = cells[8].querySelector('a[href*="google.co.in/maps"]')?.href;
+            const vehicleDataObject = { vehicleNumber, loadData }; // Create a base object
 
             if (!row.closest('table').querySelector('.live-kms-header')) row.closest('table').querySelector('thead tr').insertAdjacentHTML('beforeend', '<th class="live-kms-header">Live KMs</th>');
             if (!row.querySelector('.live-kms-cell')) row.insertAdjacentHTML('beforeend', '<td class="live-kms-cell"></td>');
@@ -192,22 +201,26 @@
                     const liveData = await getLiveRouteData(mapLink);
                     const color = liveData.distanceKm < 75 ? '#28a745' : liveData.distanceKm < 200 ? '#007bff' : '#343a40';
                     cells[cells.length-1].innerHTML = `<span style="font-weight:bold;color:${color};">${liveData.distanceKm.toFixed(1)} km</span>`;
-                    return { hasGps: true, rowElement: row, etaCell: cells[3], liveArrivalTime: new Date(Date.now() + liveData.durationSeconds * 1000), vehicleNumber, loadData };
+                    vehicleDataObject.hasGps = true;
+                    vehicleDataObject.liveArrivalTime = new Date(Date.now() + liveData.durationSeconds * 1000);
                 } catch (apiError) {
-                    console.error(`API Failsafe Triggered for ${vehicleNumber}:`, apiError.message, 'Falling back to scheduled ETA.');
+                    console.error(`API Failsafe for ${vehicleNumber}:`, apiError.message);
                     row.classList.add('no-gps-row');
                     cells[cells.length - 1].innerHTML = `<span style="color: #dc3545; font-weight: bold;" title="${apiError.message}">API Error</span>`;
-                    return { hasGps: false, rowElement: row, etaCell: cells[3], estimatedArrivalTime: parseDateTimeString(etaString), vehicleNumber, loadData };
+                    vehicleDataObject.hasGps = false;
+                    vehicleDataObject.estimatedArrivalTime = parseDateTimeString(etaString);
                 }
             } else {
                 row.classList.add('no-gps-row'); cells[cells.length - 1].textContent = 'No GPS';
-                return { hasGps: false, rowElement: row, etaCell: cells[3], estimatedArrivalTime: parseDateTimeString(etaString), vehicleNumber, loadData };
+                vehicleDataObject.hasGps = false;
+                vehicleDataObject.estimatedArrivalTime = parseDateTimeString(etaString);
             }
+            return { ...vehicleDataObject, rowElement: row, etaCell: cells[3], data: vehicleDataObject }; // Return the full data object
         } catch (e) { console.error('Row Processing Error:', row, e); return null; }
     }
 
     // ===================================================================
-    //  ANALYTICAL ENGINE
+    //  ANALYTICAL ENGINE & NOTIFICATIONS
     // ===================================================================
     function runShiftAnalysis(vehicleData) {
         const now = new Date(), todayBase = new Date(new Date().setHours(0,0,0,0)), tomorrowBase = new Date(new Date(todayBase).setDate(todayBase.getDate() + 1));
@@ -236,9 +249,32 @@
         return analysis;
     }
 
+    function triggerPostSyncNotification(storedData) {
+        const analysis = runShiftAnalysis(storedData);
+        const { currentShift } = getShiftStatus();
+        if (!currentShift) return;
+
+        // *** FIX: Corrected character index from 7 to 6 ***
+        const currentShiftData = analysis.today.shifts[currentShift.name.charAt(6)]; // 'Shift A' -> 'A'
+        if (!currentShiftData) return;
+
+        const vehicleCount = currentShiftData.v.length;
+        const totalLoad = currentShiftData.v.reduce((a,c) => a + c.totalLoad, 0);
+        const totalMixedBags = currentShiftData.v.reduce((a,c) => a + c.mixedBagPkgCountForAlert, 0);
+
+        GM_notification({
+            title: '📊 Sync Complete: Current Shift Briefing',
+            text: `Current shift (${currentShift.name}) has ${vehicleCount} vehicles expected.\nTotal Load: ${totalLoad.toLocaleString()}\nTotal Mixed Bags: ${totalMixedBags.toLocaleString()}`,
+            image: 'https://www.google.com/s2/favicons?domain=delhivery.com',
+            highlight: false,
+            onclick: () => window.focus()
+        });
+    }
+
     // ===================================================================
     //  DYNAMIC HTML & HELPERS
     // ===================================================================
+    /* Functions for generating UI elements */
     function generateShiftPanels(analysis) {
         let html = generateSummaryKPIs(analysis.overall);
         ['today', 'tomorrow'].forEach(dayKey => {
@@ -287,7 +323,7 @@
         const now = new Date(), h = now.getHours(); let cs = null, st = "Between Shifts";
         if(h>=7&&h<13){cs=SHIFTS.A;st="Shift A in Progress";}else if(h>=13&&h<16){cs=SHIFTS.B;st="⚡ Shift A & B Overlap";}else if(h>=16&&h<22){cs=SHIFTS.B;st="Shift B in Progress";}else if(h>=22||h<7){cs=SHIFTS.C;st="🌙 Night Shift in Progress";}
         let endsIn='N/A'; if(cs){let ed=new Date();if(cs.end<cs.start&&h>=cs.start)ed.setDate(ed.getDate()+1);ed.setHours(cs.end,0,0,0);const df=ed-now,eh=Math.floor(df/36e5),em=Math.floor((df%36e5)/6e4);endsIn=`${eh}h ${em}m`;}
-        return {st, endsIn, now};
+        return {st, endsIn, now, currentShift: cs};
     }
     function updateDynamicHeader(el) {
         const {st, endsIn, now} = getShiftStatus();
@@ -315,17 +351,38 @@
     function formatTimeAgo(iso) { const s = Math.round((new Date() - new Date(iso)) / 1000), m = Math.round(s/60), h = Math.round(m/60); if(s<60)return`${s}s`;if(m<60)return`${m}m`;if(h<24)return`${h}h`;return new Date(iso).toLocaleDateString('en-IN');}
     function formatTimeSince(date) { const diffMs = new Date() - date; const elapsedMinutes = Math.floor(diffMs / 60000); const h = Math.floor(elapsedMinutes / 60); const m = elapsedMinutes % 60; let agoText = ''; if (h > 0) agoText += `${h}h `; agoText += `${m}m ago`; return agoText; }
     async function markAsComplete(vNum) { let d = JSON.parse(await GM_getValue('inboundVehicleData','{}')); if(d[vNum]) delete d[vNum]; await GM_setValue('inboundVehicleData',JSON.stringify(d)); const r = document.getElementById(`vehicle-row-${vNum}`); if (r){r.style.opacity='0';setTimeout(()=>r.remove(),300);}}
-    function startTickingCountdown(cell, arrival, arr) {
+    function startTickingCountdown(cell, vehicleData, vehicleId, arr) {
+        const arrival = new Date(vehicleData.liveArrivalTime || vehicleData.estimatedArrivalTime);
         if (!cell||!arrival)return;
         const timer=setInterval(()=>{
             const now = new Date();
             const diffMs = now - arrival;
-            if (diffMs < 0) {
-                const s = Math.abs(diffMs) / 1000;
-                const h=Math.floor(s/3600),m=Math.floor((s%3600)/60),sec=Math.floor(s%60);
+            const remainingSeconds = Math.abs(diffMs) / 1000;
+
+            if (diffMs < 0) { // Still en-route
+                const h=Math.floor(remainingSeconds/3600),m=Math.floor((remainingSeconds%3600)/60),sec=Math.floor(remainingSeconds%60);
                 cell.innerHTML=`<span class="countdown-timer">${String(h).padStart(2,'0')}:${String(m).padStart(2,'0')}:${String(sec).padStart(2,'0')}</span>`;
-            } else {
+
+                // Proximity notifications
+                if (remainingSeconds <= 3660 && remainingSeconds > 3540 && !notifiedVehicles[vehicleId]?.notified60) {
+                    if(!notifiedVehicles[vehicleId]) notifiedVehicles[vehicleId] = {};
+                    notifiedVehicles[vehicleId].notified60 = true;
+                    GM_notification({ title: `⏳ Approaching: ${vehicleId}`, text: `ETA: ~1 hour\nLoad: ${vehicleData.loadData.totalLoad.toLocaleString()}, Mixed Bags: ${vehicleData.loadData.mixedBagPkgCountForAlert.toLocaleString()}`, image: 'https://www.google.com/s2/favicons?domain=delhivery.com', onclick: () => window.focus() });
+                }
+                if (remainingSeconds <= 1860 && remainingSeconds > 1740 && !notifiedVehicles[vehicleId]?.notified30) {
+                    if(!notifiedVehicles[vehicleId]) notifiedVehicles[vehicleId] = {};
+                    notifiedVehicles[vehicleId].notified30 = true;
+                    GM_notification({ title: `🔥 Arriving Soon: ${vehicleId}`, text: `ETA: ~30 minutes\nLoad: ${vehicleData.loadData.totalLoad.toLocaleString()}, Mixed Bags: ${vehicleData.loadData.mixedBagPkgCountForAlert.toLocaleString()}`, image: 'https://www.google.com/s2/favicons?domain=delhivery.com', highlight: true, onclick: () => window.focus() });
+                }
+
+            } else { // Arrived
                 cell.innerHTML = `<span class="arrived-text">Arrived<br><span class="arrived-ago">(${formatTimeSince(arrival)})</span></span>`;
+                if (!notifiedVehicles[vehicleId]?.notifiedArrived) {
+                    if(!notifiedVehicles[vehicleId]) notifiedVehicles[vehicleId] = {};
+                    notifiedVehicles[vehicleId].notifiedArrived = true;
+                    GM_notification({ title: `✅ Vehicle Arrived: ${vehicleId}`, text: `Ready for unloading.`, image: 'https://www.google.com/s2/favicons?domain=delhivery.com', highlight: true, onclick: () => window.focus() });
+                    setTimeout(() => clearInterval(timer), 60000); // Stop timer a minute after arrival
+                }
             }
         }, 1000);
         arr.push(timer);
