@@ -1,9 +1,9 @@
 // ==UserScript==
-// @name         Team Sonic - Definitive Suite (v23.3 - Stability Fix)
+// @name         Team Sonic - Definitive Suite (v23.4 - SPA Navigation Fix)
 // @namespace    http://tampermonkey.net/
-// @version      23.3
-// @description  [CRITICAL STABILITY FIX] Resolves script loading failure from v23.2. Includes advanced notification settings and enhanced alert content.
-// @author       Rh | Team Sonic
+// @version      23.4
+// @description  [SPA FIX] Script now intelligently detects tab navigation and content changes, ensuring buttons and data persist across the entire site without needing to refresh.
+// @author       Rh. | Team Sonic (Creative AI Build)
 // @match        https://eye.delhivery.com/*
 // @connect      api.mapbox.com
 // @grant        GM_addStyle
@@ -49,7 +49,32 @@
         }
     };
 
-    // --- INITIALIZATION ---
+    // --- INITIALIZATION & SPA FIX ---
+
+    // FIX: This function contains the logic to add buttons and features.
+    // It's designed to be called safely multiple times.
+    const runSetup = () => {
+        setupGlobalViewerButton();
+        setupShiftInsightsButton();
+
+        // The Inbound tab might not exist on initial load, so we check for it.
+        const targetTable = document.querySelector('table.table_custom_1');
+        if (targetTable && window.location.href.includes('tab=inbound')) {
+            setupInboundDashboard(targetTable);
+        }
+    };
+
+    // FIX: Debounce utility to prevent the setup function from running too rapidly during page changes.
+    const debounce = (func, delay) => {
+        let timeout;
+        return (...args) => {
+            clearTimeout(timeout);
+            timeout = setTimeout(() => func.apply(this, args), delay);
+        };
+    };
+
+    const debouncedRunSetup = debounce(runSetup, 500);
+
     const initialize = async () => {
         try {
             const savedSettings = JSON.parse(await GM_getValue('teamSonicSettings', '{}'));
@@ -60,28 +85,29 @@
             console.error('Team Sonic Script: Could not load settings, using defaults.', e);
         }
 
-        setTimeout(() => {
-            cleanupUI();
-            setupGlobalViewerButton();
-            setupShiftInsightsButton();
-            if (window.location.href.includes('tab=inbound')) {
-                setupInboundDashboard();
-            }
-        }, 2200);
-    };
-    window.addEventListener('load', initialize, false);
-    window.addEventListener('hashchange', initialize, false);
+        // Run setup once on initial load after a delay.
+        setTimeout(runSetup, 2500);
 
-    function cleanupUI() {
-        ['#team-sonic-saver-container', '#team-sonic-viewer-button', '#team-sonic-insights-button']
-        .forEach(sel => document.querySelector(sel)?.remove());
-    }
+        // FIX: Use a MutationObserver to watch for page changes (tab switching).
+        // This makes the script compatible with Single-Page Applications.
+        const observer = new MutationObserver((mutations) => {
+            // We run the setup function whenever the page content changes.
+            debouncedRunSetup();
+        });
+
+        // Start observing the main body of the page for added/removed content.
+        observer.observe(document.body, { childList: true, subtree: true });
+    };
+
+    // We only need to listen for the initial window load to start the script.
+    window.addEventListener('load', initialize, false);
+
 
     // ===================================================================
     //  UI & BUTTON SETUP
     // ===================================================================
     function setupGlobalViewerButton() {
-        if (document.getElementById('team-sonic-viewer-button')) return;
+        if (document.getElementById('team-sonic-viewer-button')) return; // Safe to call multiple times
         const btn = document.createElement('button');
         btn.id = 'team-sonic-viewer-button';
         btn.innerHTML = `👁️ View Live Data`;
@@ -90,7 +116,7 @@
     }
 
     function setupShiftInsightsButton() {
-        if (document.getElementById('team-sonic-insights-button')) return;
+        if (document.getElementById('team-sonic-insights-button')) return; // Safe to call multiple times
         const btn = document.createElement('button');
         btn.id = 'team-sonic-insights-button';
         btn.innerHTML = `🚀 Shift Insights`;
@@ -99,39 +125,25 @@
     }
 
     // ===================================================================
-    //  "VIEWER" MODAL
+    //  "SAVER" & INBOUND DASHBOARD LOGIC
     // ===================================================================
-    async function showDataModal() {
-        document.getElementById('saved-data-modal')?.remove();
-        activeTimers.modal.forEach(clearInterval);
-        activeTimers.modal = [];
+    // CHANGE: Function now accepts the table element directly.
+    function setupInboundDashboard(targetTable) {
+        if (!targetTable || document.getElementById('team-sonic-saver-container')) return; // Safe to call multiple times
+        const btnContainer = document.createElement('div');
+        btnContainer.id = 'team-sonic-saver-container';
+        const saveBtn = document.createElement('button');
+        saveBtn.className = 'action-button saver';
+        saveBtn.textContent = 'Team Sonic: Enhance Incoming Data';
+        saveBtn.onclick = () => runSaveAnalysis(targetTable);
+        btnContainer.appendChild(saveBtn);
+        targetTable.parentNode.insertBefore(btnContainer, targetTable);
+    }
 
-        const modal = document.createElement('div');
-        modal.id = 'saved-data-modal';
+    /* --- ALL OTHER FUNCTIONS (Modals, Analysis, Notifications, etc.) remain unchanged --- */
 
-        const lastSync = await GM_getValue('lastSyncTimestamp', null);
-        const syncInfo = lastSync ? `<b>${formatTimeAgo(lastSync)}</b> ago` : `No data synced yet.`;
-        const storedData = await getCleanedVehicleData();
-
-        const allVehicles = Object.entries(storedData).map(([number, data]) => ({ number, ...data }));
-        allVehicles.sort((a, b) => {
-            const timeA = new Date(a.liveArrivalTime || a.estimatedArrivalTime);
-            const timeB = new Date(b.liveArrivalTime || b.estimatedArrivalTime);
-            return timeA - timeB;
-        });
-
-        let tableHtml = '';
-        if (allVehicles.length === 0) {
-            tableHtml = '<tr><td colspan="6" class="no-data-cell">No vehicle data. Go to the "Inbound" tab to sync.</td></tr>';
-        } else {
-            allVehicles.forEach(d => {
-                const vehicleNum = d.number;
-                const rowClass = !d.hasGps ? 'no-gps-row' : 'gps-row';
-                tableHtml += `<tr class="${rowClass}" id="vehicle-row-${vehicleNum}"><td>${vehicleNum}</td><td>${d.originFacility||'N/A'}</td><td>${d.totalLoad.toLocaleString()}</td><td>${d.mixedBagPkgCountForAlert.toLocaleString()}</td><td id="countdown-${vehicleNum}">...</td><td><button class="complete-btn" data-vehicle-num="${vehicleNum}">Complete</button></td></tr>`;
-            });
-        }
-
-        modal.innerHTML = `<div class="modal-overlay"></div>
+    async function showDataModal(){document.getElementById('saved-data-modal')?.remove();activeTimers.modal.forEach(clearInterval);activeTimers.modal=[];const modal=document.createElement('div');modal.id='saved-data-modal';const lastSync=await GM_getValue('lastSyncTimestamp',null);const syncInfo=lastSync?`<b>${formatTimeAgo(lastSync)}</b> ago`:`No data synced yet.`;const storedData=await getCleanedVehicleData();const allVehicles=Object.entries(storedData).map(([number,data])=>({number,...data}));allVehicles.sort((a,b)=>{const timeA=new Date(a.liveArrivalTime||a.estimatedArrivalTime);const timeB=new Date(b.liveArrivalTime||b.estimatedArrivalTime);return timeA-timeB});let tableHtml='';if(allVehicles.length===0){tableHtml='<tr><td colspan="6" class="no-data-cell">No vehicle data. Go to the "Inbound" tab to sync.</td></tr>'}else{allVehicles.forEach(d=>{const vehicleNum=d.number;const rowClass=!d.hasGps?'no-gps-row':'gps-row';tableHtml+=`<tr class="${rowClass}" id="vehicle-row-${vehicleNum}"><td>${vehicleNum}</td><td>${d.originFacility||'N/A'}</td><td>${d.totalLoad.toLocaleString()}</td><td>${d.mixedBagPkgCountForAlert.toLocaleString()}</td><td id="countdown-${vehicleNum}">...</td><td><button class="complete-btn" data-vehicle-num="${vehicleNum}">Complete</button></td></tr>`})}
+    modal.innerHTML=`<div class="modal-overlay"></div>
             <div class="modal-content">
                 <div class="modal-header">
                     <h2>Hubli Inbound Vehicles</h2>
@@ -144,24 +156,24 @@
                     <h3>Notification Settings</h3>
                     <div class="setting-item">
                         <label for="notifications-enabled">Enable Notifications</label>
-                        <label class="switch"><input type="checkbox" id="notifications-enabled" ${userSettings.notifications.enabled ? 'checked' : ''}><span class="slider round"></span></label>
+                        <label class="switch"><input type="checkbox" id="notifications-enabled" ${userSettings.notifications.enabled?'checked':''}><span class="slider round"></span></label>
                     </div>
-                    <fieldset id="notification-types" ${!userSettings.notifications.enabled ? 'disabled' : ''}>
+                    <fieldset id="notification-types" ${!userSettings.notifications.enabled?'disabled':''}>
                         <div class="setting-item">
                             <label for="notify-60min">60-Min Approach Alert</label>
-                            <label class="switch"><input type="checkbox" name="on60min" ${userSettings.notifications.on60min ? 'checked' : ''}><span class="slider round"></span></label>
+                            <label class="switch"><input type="checkbox" name="on60min" ${userSettings.notifications.on60min?'checked':''}><span class="slider round"></span></label>
                         </div>
                         <div class="setting-item">
                             <label for="notify-30min">30-Min Arrival Alert</label>
-                            <label class="switch"><input type="checkbox" name="on30min" ${userSettings.notifications.on30min ? 'checked' : ''}><span class="slider round"></span></label>
+                            <label class="switch"><input type="checkbox" name="on30min" ${userSettings.notifications.on30min?'checked':''}><span class="slider round"></span></label>
                         </div>
                         <div class="setting-item">
                             <label for="notify-arrival">Vehicle Arrived Alert</label>
-                            <label class="switch"><input type="checkbox" name="onArrival" ${userSettings.notifications.onArrival ? 'checked' : ''}><span class="slider round"></span></label>
+                            <label class="switch"><input type="checkbox" name="onArrival" ${userSettings.notifications.onArrival?'checked':''}><span class="slider round"></span></label>
                         </div>
                          <div class="setting-item">
                             <label for="notify-sync">Post-Sync Shift Briefing</label>
-                            <label class="switch"><input type="checkbox" name="onSync" ${userSettings.notifications.onSync ? 'checked' : ''}><span class="slider round"></span></label>
+                            <label class="switch"><input type="checkbox" name="onSync" ${userSettings.notifications.onSync?'checked':''}><span class="slider round"></span></label>
                         </div>
                     </fieldset>
                 </div>
@@ -174,306 +186,20 @@
                     </table>
                 </div>
                 <div class="modal-footer"><p>Designed & Crafted by Rh. | for ⚡ Team Sonic - Hubli (for internal use only)</p></div>
-            </div>`;
-
-        document.body.appendChild(modal);
-
-        allVehicles.forEach(d => {
-            startTickingCountdown(modal.querySelector(`#countdown-${d.number}`), d, d.number, activeTimers.modal);
-        });
-
-        modal.querySelector('.close-btn').onclick = () => { activeTimers.modal.forEach(clearInterval); modal.remove(); };
-        modal.querySelectorAll('.complete-btn').forEach(btn => btn.onclick = () => markAsComplete(btn.dataset.vehicleNum));
-
-        const settingsBtn = modal.querySelector('.settings-btn');
-        const settingsPanel = modal.querySelector('#settings-panel');
-        const masterToggle = modal.querySelector('#notifications-enabled');
-        const typesFieldset = modal.querySelector('#notification-types');
-
-        const saveSettings = async () => {
-            await GM_setValue('teamSonicSettings', JSON.stringify(userSettings));
-            const feedback = document.querySelector('#settings-saved-feedback');
-            if (feedback) feedback.remove();
-            const newFeedback = document.createElement('span');
-            newFeedback.textContent = 'Saved!';
-            newFeedback.id = 'settings-saved-feedback';
-            newFeedback.style.color = '#28a745';
-            newFeedback.style.marginLeft = '10px';
-            settingsPanel.querySelector('h3').appendChild(newFeedback);
-            setTimeout(() => newFeedback.remove(), 2000);
-        };
-
-        settingsBtn.onclick = () => settingsPanel.classList.toggle('hidden');
-
-        masterToggle.onchange = (e) => {
-            userSettings.notifications.enabled = e.target.checked;
-            typesFieldset.disabled = !e.target.checked;
-            saveSettings();
-        };
-
-        typesFieldset.querySelectorAll('input[type="checkbox"]').forEach(toggle => {
-            toggle.onchange = (e) => {
-                userSettings.notifications[e.target.name] = e.target.checked;
-                saveSettings();
-            };
-        });
-    }
-
-
-    // ===================================================================
-    //  "SAVER" & INBOUND DASHBOARD LOGIC
-    // ===================================================================
-    function setupInboundDashboard() {
-        const targetTable = document.querySelector('table.table_custom_1');
-        if (!targetTable || document.getElementById('team-sonic-saver-container')) return;
-        const btnContainer = document.createElement('div');
-        btnContainer.id = 'team-sonic-saver-container';
-        const saveBtn = document.createElement('button');
-        saveBtn.className = 'action-button saver';
-        saveBtn.textContent = 'Team Sonic: Enhance Incoming Data';
-        saveBtn.onclick = () => runSaveAnalysis(targetTable);
-        btnContainer.appendChild(saveBtn);
-        targetTable.parentNode.insertBefore(btnContainer, targetTable);
-    }
-
-    async function runSaveAnalysis(table) {
-        const btn = document.querySelector('#team-sonic-saver-container .saver');
-        btn.textContent = 'Enhancing & Saving...'; btn.disabled = true;
-        activeTimers.inbound.forEach(clearInterval); activeTimers.inbound = [];
-        notifiedVehicles = {};
-
-        let storedData = JSON.parse(await GM_getValue('inboundVehicleData', '{}'));
-        const rows = Array.from(table.querySelectorAll('tbody tr'));
-        const vehicles = (await Promise.all(rows.map(fetchAndProcessVehicleData))).filter(v => v !== null);
-
-        vehicles.forEach(v => {
-            storedData[v.vehicleNumber] = {
-                hasGps: v.hasGps,
-                liveArrivalTime: v.hasGps ? v.liveArrivalTime.toISOString() : null,
-                estimatedArrivalTime: v.estimatedArrivalTime.toISOString(),
-                originFacility: v.loadData.originFacility,
-                totalLoad: v.loadData.totalLoad,
-                mixedBagPkgCountForAlert: v.loadData.mixedBagPkgCountForAlert,
-                savedAt: new Date().toISOString()
-            };
-        });
-
-        await GM_setValue('inboundVehicleData', JSON.stringify(storedData));
-        await GM_setValue('lastSyncTimestamp', new Date().toISOString());
-
-        triggerPostSyncNotification(storedData);
-        renderInboundUI(table, vehicles);
-
-        btn.textContent = 'Data Enhanced & Saved!';
-        setTimeout(() => { btn.disabled = false; btn.textContent = 'Team Sonic: Enhance Incoming Data'; }, 3000);
-    }
-
-    function renderInboundUI(table, allVehicles) {
-        allVehicles.sort((a, b) => {
-            const timeA = a.liveArrivalTime || a.estimatedArrivalTime;
-            const timeB = b.liveArrivalTime || b.estimatedArrivalTime;
-            return timeA - timeB;
-        });
-
-        table.querySelector('tbody').innerHTML = '';
-        const noGpsContainer = document.getElementById('no-gps-container');
-        if(noGpsContainer) noGpsContainer.remove();
-
-        allVehicles.forEach(v => {
-            table.querySelector('tbody').appendChild(v.rowElement);
-            startTickingCountdown(v.etaCell, { ...v.data, ...v.loadData }, v.vehicleNumber, activeTimers.inbound);
-        });
-    }
-
-    async function fetchAndProcessVehicleData(row) {
-        try {
-            const cells = row.cells, vehicleNumber = cells[0].querySelector('a')?.textContent.trim();
-            if (!vehicleNumber) return null;
-            const etaString = cells[3].textContent.trim().split('\n')[0];
-            const mixedStr = cells[6].textContent || "";
-            const loadData = {
-                originFacility: cells[2].textContent.trim(),
-                totalLoad: (parseInt(cells[5].textContent,10)||0)+(parseInt(cells[7].textContent,10)||0)+(parseInt(mixedStr,10)||0),
-                mixedBagPkgCountForAlert: (mixedStr.match(/\((\d+)\)/)?parseInt(mixedStr.match(/\((\d+)\)/)[1],10):0)
-            };
-            const mapLink = cells[8].querySelector('a[href*="google.co.in/maps"]')?.href;
-
-            const vehicleDataObject = { vehicleNumber, loadData, estimatedArrivalTime: parseDateTimeString(etaString) };
-
-            if (!row.closest('table').querySelector('.live-kms-header')) {
-                row.closest('table').querySelector('thead tr').insertAdjacentHTML('beforeend', '<th class="live-kms-header">Live KMs</th>');
-            }
-            if (!row.querySelector('.live-kms-cell')) {
-                row.insertAdjacentHTML('beforeend', '<td class="live-kms-cell"></td>');
-            }
-
-            if (mapLink) {
-                try {
-                    const liveData = await getLiveRouteData(mapLink);
-                    const color = liveData.distanceKm < 75 ? '#28a745' : liveData.distanceKm < 200 ? '#007bff' : '#343a40';
-                    cells[cells.length-1].innerHTML = `<span style="font-weight:bold;color:${color};">${liveData.distanceKm.toFixed(1)} km</span>`;
-                    vehicleDataObject.hasGps = true;
-                    vehicleDataObject.liveArrivalTime = new Date(Date.now() + liveData.durationSeconds * 1000);
-                } catch (apiError) {
-                    console.error(`API Failsafe for ${vehicleNumber}:`, apiError.message);
-                    row.classList.add('no-gps-row');
-                    cells[cells.length - 1].innerHTML = `<span style="color: #dc3545; font-weight: bold;" title="${apiError.message}">API Error</span>`;
-                    vehicleDataObject.hasGps = false;
-                }
-            } else {
-                row.classList.add('no-gps-row'); cells[cells.length - 1].textContent = 'No GPS';
-                vehicleDataObject.hasGps = false;
-            }
-            return { ...vehicleDataObject, rowElement: row, etaCell: cells[3], data: vehicleDataObject };
-        } catch (e) { console.error('Row Processing Error:', row, e); return null; }
-    }
-
-
-    // ===================================================================
-    //  ANALYTICAL ENGINE & NOTIFICATIONS
-    // ===================================================================
-    function runShiftAnalysis(vehicleData) {
-        const now = new Date();
-        const todayBase = new Date(new Date().setHours(0, 0, 0, 0));
-        const tomorrowBase = new Date(new Date(todayBase).setDate(todayBase.getDate() + 1));
-        const todayWorkdayEnd = new Date(new Date(tomorrowBase).setHours(SHIFTS.C.end, 0, 0, 0));
-        const tomorrowWorkdayEnd = new Date(new Date(todayWorkdayEnd).setDate(todayWorkdayEnd.getDate() + 1));
-        const analysis = {
-            today: { date: 'Today', shifts: { A: { ...SHIFTS.A, v: [] }, B: { ...SHIFTS.B, v: [] }, C: { ...SHIFTS.C, v: [] } } },
-            tomorrow: { date: 'Tomorrow', shifts: { A: { ...SHIFTS.A, v: [] }, B: { ...SHIFTS.B, v: [] }, C: { ...SHIFTS.C, v: [] } } },
-            later: { date: 'Later', v: [] },
-            overall: { totalLoad: 0, totalMixedBags: 0, vehicleCount: 0 }
-        };
-        const getShiftBounds = (base) => ({
-            A: { s: new Date(new Date(base).setHours(SHIFTS.A.start, 0)), e: new Date(new Date(base).setHours(SHIFTS.A.end, 0)) },
-            B: { s: new Date(new Date(base).setHours(SHIFTS.B.start, 0)), e: new Date(new Date(base).setHours(SHIFTS.B.end, 0)) },
-            C: { s: new Date(new Date(base).setHours(SHIFTS.C.start, 0)), e: new Date(new Date(base).setDate(base.getDate() + 1)).setHours(SHIFTS.C.end, 0) }
-        });
-        const todayShifts = getShiftBounds(todayBase);
-        const tomorrowShifts = getShiftBounds(tomorrowBase);
-
-        for (const [id, details] of Object.entries(vehicleData)) {
-            if (!details) continue;
-            const eta = new Date(details.liveArrivalTime || details.estimatedArrivalTime);
-            if (isNaN(eta.getTime())) continue;
-
-            const readyTime = new Date(eta.getTime() + PREP_BUFFER_MINS * 60000);
-            let dayKey, shiftBounds;
-            if (readyTime < todayWorkdayEnd) {
-                dayKey = 'today'; shiftBounds = todayShifts;
-            } else if (readyTime < tomorrowWorkdayEnd) {
-                dayKey = 'tomorrow'; shiftBounds = tomorrowShifts;
-            } else { dayKey = 'later'; }
-            let shiftKey = null;
-            if (dayKey !== 'later') {
-                for (const [k, b] of Object.entries(shiftBounds)) {
-                    if (readyTime >= b.s && readyTime < b.e) {
-                        shiftKey = k; break;
-                    }
-                }
-            }
-            const unloadCompletionTime = new Date(readyTime.getTime() + (details.totalLoad / UNLOAD_RATE_PER_HOUR_PER_BAY) * 3600000);
-            const mixedBagProcessingMinutes = (details.mixedBagPkgCountForAlert / MIX_BAG_PROCESS_RATE_PER_HOUR) * 60;
-            const finalCompletionTime = new Date(unloadCompletionTime.getTime() + mixedBagProcessingMinutes * 60000);
-            let status = 'onTime', spilloverMinutes = 0;
-            if (shiftKey) {
-                const shiftEnd = new Date(shiftBounds[shiftKey].e);
-                const extendedEnd = new Date(shiftEnd.getTime() + SHIFT_EXTENSION_MINS * 60000);
-                if (finalCompletionTime > shiftEnd) {
-                    status = (finalCompletionTime > extendedEnd) ? 'handover' : 'overtime';
-                    spilloverMinutes = Math.round((finalCompletionTime - shiftEnd) / 60000);
-                }
-            }
-            const pVehicle = { ...details, id, eta, readyTime, finalCompletionTime, status, isPastETA: eta < now, spilloverMinutes };
-            analysis.overall.totalLoad += details.totalLoad; analysis.overall.totalMixedBags += details.mixedBagPkgCountForAlert; analysis.overall.vehicleCount++;
-            if (dayKey === 'later') { analysis.later.v.push(pVehicle); }
-            else if (shiftKey) { analysis[dayKey].shifts[shiftKey].v.push(pVehicle); }
-        }
-        analysis.today.shifts.A.endDate = todayShifts.A.e; analysis.today.shifts.B.endDate = todayShifts.B.e; analysis.today.shifts.C.endDate = todayShifts.C.e;
-        analysis.tomorrow.shifts.A.endDate = tomorrowShifts.A.e; analysis.tomorrow.shifts.B.endDate = tomorrowShifts.B.e; analysis.tomorrow.shifts.C.endDate = tomorrowShifts.C.e;
-        return analysis;
-    }
-
-
-    function triggerPostSyncNotification(storedData) {
-        if (!userSettings.notifications.enabled || !userSettings.notifications.onSync) return;
-
-        const analysis = runShiftAnalysis(storedData);
-        const { currentShift } = getShiftStatus();
-        if (!currentShift) return;
-
-        const currentShiftData = analysis.today.shifts[currentShift.name.charAt(6)];
-        if (!currentShiftData) return;
-
-        const vehicleCount = currentShiftData.v.length;
-        const totalLoad = currentShiftData.v.reduce((a,c) => a + c.totalLoad, 0);
-        const totalMixedBags = currentShiftData.v.reduce((a,c) => a + c.mixedBagPkgCountForAlert, 0);
-
-        GM_notification({
-            title: '📊 Sync Complete: Current Shift Briefing',
-            text: `Current shift (${currentShift.name}) has ${vehicleCount} vehicles expected.\nTotal Load: ${totalLoad.toLocaleString()}\nTotal Mixed Bags: ${totalMixedBags.toLocaleString()}`,
-            image: 'https://www.google.com/s2/favicons?domain=delhivery.com',
-            highlight: false,
-            onclick: () => window.focus()
-        });
-    }
-
-    // ===================================================================
-    //  DYNAMIC HTML & HELPERS
-    // ===================================================================
-    function startTickingCountdown(cell, vehicleData, vehicleId, arr) {
-        const arrival = new Date(vehicleData.liveArrivalTime || vehicleData.estimatedArrivalTime);
-        if (!cell || !arrival || isNaN(arrival.getTime())) return;
-
-        const timer = setInterval(() => {
-            const now = new Date();
-            const diffMs = now - arrival;
-            const remainingSeconds = Math.abs(diffMs) / 1000;
-
-            if (diffMs < 0) {
-                const h = Math.floor(remainingSeconds / 3600), m = Math.floor((remainingSeconds % 3600) / 60), sec = Math.floor(remainingSeconds % 60);
-                cell.innerHTML = `<span class="countdown-timer">${String(h).padStart(2,'0')}:${String(m).padStart(2,'0')}:${String(sec).padStart(2,'0')}</span>`;
-
-                if (userSettings.notifications.enabled && vehicleData.hasGps) {
-                    const load = vehicleData.totalLoad || 0;
-                    const origin = vehicleData.originFacility || 'N/A';
-
-                    if (userSettings.notifications.on60min && remainingSeconds <= 3660 && remainingSeconds > 3540 && !notifiedVehicles[vehicleId]?.notified60) {
-                        if (!notifiedVehicles[vehicleId]) notifiedVehicles[vehicleId] = {};
-                        notifiedVehicles[vehicleId].notified60 = true;
-                        GM_notification({ title: `⏳ Approaching: ${vehicleId}`, text: `From: ${origin}\nETA: ~1 hour\nLoad: ${load.toLocaleString()}`, image: 'https://www.google.com/s2/favicons?domain=delhivery.com', onclick: () => window.focus() });
-                    }
-                    if (userSettings.notifications.on30min && remainingSeconds <= 1860 && remainingSeconds > 1740 && !notifiedVehicles[vehicleId]?.notified30) {
-                        if (!notifiedVehicles[vehicleId]) notifiedVehicles[vehicleId] = {};
-                        notifiedVehicles[vehicleId].notified30 = true;
-                        GM_notification({ title: `🔥 Arriving Soon: ${vehicleId}`, text: `From: ${origin}\nETA: ~30 mins\nLoad: ${load.toLocaleString()}`, image: 'https://www.google.com/s2/favicons?domain=delhivery.com', highlight: true, onclick: () => window.focus() });
-                    }
-                }
-            } else {
-                if (vehicleData.hasGps) {
-                    cell.innerHTML = `<span class="arrived-text">Arrived<br><span class="arrived-ago">(${formatTimeSince(arrival)})</span></span>`;
-                    if (userSettings.notifications.enabled && userSettings.notifications.onArrival && !notifiedVehicles[vehicleId]?.notifiedArrived) {
-                        if(!notifiedVehicles[vehicleId]) notifiedVehicles[vehicleId] = {};
-                        notifiedVehicles[vehicleId].notifiedArrived = true;
-                        const origin = vehicleData.originFacility || 'N/A';
-                        GM_notification({ title: `✅ Vehicle Arrived: ${vehicleId}`, text: `From: ${origin}\nReady for unloading.`, image: 'https://www.google.com/s2/favicons?domain=delhivery.com', highlight: true, onclick: () => window.focus() });
-                        setTimeout(() => clearInterval(timer), 60000);
-                    }
-                } else {
-                    const elapsedMinutes = Math.floor(diffMs / 60000);
-                    const h = Math.floor(elapsedMinutes / 60);
-                    const m = elapsedMinutes % 60;
-                    let agoText = '';
-                    if (h > 0) agoText += `${h}h `;
-                    agoText += `${m}m ago`;
-                    cell.innerHTML = `<span class="should-have-arrived-text">Should have arrived<br><span class="arrived-ago">(${agoText})</span></span>`;
-                }
-            }
-        }, 1000);
-        arr.push(timer);
-    }
-
-    // FIX: Restored all helper functions to be readable and bug-free.
+            </div>`;document.body.appendChild(modal);allVehicles.forEach(d=>{startTickingCountdown(modal.querySelector(`#countdown-${d.number}`),d,d.number,activeTimers.modal)});modal.querySelector('.close-btn').onclick=()=>{activeTimers.modal.forEach(clearInterval);modal.remove()};modal.querySelectorAll('.complete-btn').forEach(btn=>btn.onclick=()=>markAsComplete(btn.dataset.vehicleNum));const settingsBtn=modal.querySelector('.settings-btn');const settingsPanel=modal.querySelector('#settings-panel');const masterToggle=modal.querySelector('#notifications-enabled');const typesFieldset=modal.querySelector('#notification-types');const saveSettings=async()=>{await GM_setValue('teamSonicSettings',JSON.stringify(userSettings));const feedback=document.querySelector('#settings-saved-feedback');if(feedback)feedback.remove();const newFeedback=document.createElement('span');newFeedback.textContent='Saved!';newFeedback.id='settings-saved-feedback';newFeedback.style.color='#28a745';newFeedback.style.marginLeft='10px';settingsPanel.querySelector('h3').appendChild(newFeedback);setTimeout(()=>newFeedback.remove(),2000)};settingsBtn.onclick=()=>settingsPanel.classList.toggle('hidden');masterToggle.onchange=e=>{userSettings.notifications.enabled=e.target.checked;typesFieldset.disabled=!e.target.checked;saveSettings()};typesFieldset.querySelectorAll('input[type="checkbox"]').forEach(toggle=>{toggle.onchange=e=>{userSettings.notifications[e.target.name]=e.target.checked;saveSettings()}})}
+    async function runSaveAnalysis(table){const btn=document.querySelector('#team-sonic-saver-container .saver');btn.textContent='Enhancing & Saving...';btn.disabled=true;activeTimers.inbound.forEach(clearInterval);activeTimers.inbound=[];notifiedVehicles={};let storedData=JSON.parse(await GM_getValue('inboundVehicleData','{}'));const rows=Array.from(table.querySelectorAll('tbody tr'));const vehicles=(await Promise.all(rows.map(fetchAndProcessVehicleData))).filter(v=>v!==null);vehicles.forEach(v=>{storedData[v.vehicleNumber]={hasGps:v.hasGps,liveArrivalTime:v.hasGps?v.liveArrivalTime.toISOString():null,estimatedArrivalTime:v.estimatedArrivalTime.toISOString(),originFacility:v.loadData.originFacility,totalLoad:v.loadData.totalLoad,mixedBagPkgCountForAlert:v.loadData.mixedBagPkgCountForAlert,savedAt:new Date().toISOString()}});await GM_setValue('inboundVehicleData',JSON.stringify(storedData));await GM_setValue('lastSyncTimestamp',new Date().toISOString());triggerPostSyncNotification(storedData);renderInboundUI(table,vehicles);btn.textContent='Data Enhanced & Saved!';setTimeout(()=>{btn.disabled=false;btn.textContent='Team Sonic: Enhance Incoming Data'},3000)}
+    function renderInboundUI(table,allVehicles){allVehicles.sort((a,b)=>{const timeA=a.liveArrivalTime||a.estimatedArrivalTime;const timeB=b.liveArrivalTime||b.estimatedArrivalTime;return timeA-timeB});table.querySelector('tbody').innerHTML='';const noGpsContainer=document.getElementById('no-gps-container');if(noGpsContainer)noGpsContainer.remove();allVehicles.forEach(v=>{table.querySelector('tbody').appendChild(v.rowElement);startTickingCountdown(v.etaCell,{...v.data,...v.loadData},v.vehicleNumber,activeTimers.inbound)})}
+    async function fetchAndProcessVehicleData(row){try{const cells=row.cells,vehicleNumber=cells[0].querySelector('a')?.textContent.trim();if(!vehicleNumber)return null;const etaString=cells[3].textContent.trim().split('\n')[0];const mixedStr=cells[6].textContent||"";const loadData={originFacility:cells[2].textContent.trim(),totalLoad:(parseInt(cells[5].textContent,10)||0)+(parseInt(cells[7].textContent,10)||0)+(parseInt(mixedStr,10)||0),mixedBagPkgCountForAlert:(mixedStr.match(/\((\d+)\)/)?parseInt(mixedStr.match(/\((\d+)\)/)[1],10):0)};const mapLink=cells[8].querySelector('a[href*="google.co.in/maps"]')?.href;const vehicleDataObject={vehicleNumber,loadData,estimatedArrivalTime:parseDateTimeString(etaString)};if(!row.closest('table').querySelector('.live-kms-header')){row.closest('table').querySelector('thead tr').insertAdjacentHTML('beforeend','<th class="live-kms-header">Live KMs</th>')}
+    if(!row.querySelector('.live-kms-cell')){row.insertAdjacentHTML('beforeend','<td class="live-kms-cell"></td>')}
+    if(mapLink){try{const liveData=await getLiveRouteData(mapLink);const color=liveData.distanceKm<75?'#28a745':liveData.distanceKm<200?'#007bff':'#343a40';cells[cells.length-1].innerHTML=`<span style="font-weight:bold;color:${color};">${liveData.distanceKm.toFixed(1)} km</span>`;vehicleDataObject.hasGps=true;vehicleDataObject.liveArrivalTime=new Date(Date.now()+liveData.durationSeconds*1000)}catch(apiError){console.error(`API Failsafe for ${vehicleNumber}:`,apiError.message);row.classList.add('no-gps-row');cells[cells.length-1].innerHTML=`<span style="color: #dc3545; font-weight: bold;" title="${apiError.message}">API Error</span>`;vehicleDataObject.hasGps=false}}else{row.classList.add('no-gps-row');cells[cells.length-1].textContent='No GPS';vehicleDataObject.hasGps=false}return{...vehicleDataObject,rowElement:row,etaCell:cells[3],data:vehicleDataObject}}catch(e){console.error('Row Processing Error:',row,e);return null}}
+    function runShiftAnalysis(vehicleData){const now=new Date();const todayBase=new Date(new Date().setHours(0,0,0,0));const tomorrowBase=new Date(new Date(todayBase).setDate(todayBase.getDate()+1));const todayWorkdayEnd=new Date(new Date(tomorrowBase).setHours(SHIFTS.C.end,0,0,0));const tomorrowWorkdayEnd=new Date(new Date(todayWorkdayEnd).setDate(todayWorkdayEnd.getDate()+1));const analysis={today:{date:'Today',shifts:{A:{...SHIFTS.A,v:[]},B:{...SHIFTS.B,v:[]},C:{...SHIFTS.C,v:[]}}},tomorrow:{date:'Tomorrow',shifts:{A:{...SHIFTS.A,v:[]},B:{...SHIFTS.B,v:[]},C:{...SHIFTS.C,v:[]}}},later:{date:'Later',v:[]},overall:{totalLoad:0,totalMixedBags:0,vehicleCount:0}};const getShiftBounds=base=>({A:{s:new Date(new Date(base).setHours(SHIFTS.A.start,0)),e:new Date(new Date(base).setHours(SHIFTS.A.end,0))},B:{s:new Date(new Date(base).setHours(SHIFTS.B.start,0)),e:new Date(new Date(base).setHours(SHIFTS.B.end,0))},C:{s:new Date(new Date(base).setHours(SHIFTS.C.start,0)),e:new Date(new Date(base).setDate(base.getDate()+1)).setHours(SHIFTS.C.end,0)}});const todayShifts=getShiftBounds(todayBase);const tomorrowShifts=getShiftBounds(tomorrowBase);for(const[id,details]of Object.entries(vehicleData)){if(!details)continue;const eta=new Date(details.liveArrivalTime||details.estimatedArrivalTime);if(isNaN(eta.getTime()))continue;const readyTime=new Date(eta.getTime()+PREP_BUFFER_MINS*60000);let dayKey,shiftBounds;if(readyTime<todayWorkdayEnd){dayKey='today';shiftBounds=todayShifts}else if(readyTime<tomorrowWorkdayEnd){dayKey='tomorrow';shiftBounds=tomorrowShifts}else{dayKey='later'}
+    let shiftKey=null;if(dayKey!=='later'){for(const[k,b]of Object.entries(shiftBounds)){if(readyTime>=b.s&&readyTime<b.e){shiftKey=k;break}}}
+    const unloadCompletionTime=new Date(readyTime.getTime()+(details.totalLoad/UNLOAD_RATE_PER_HOUR_PER_BAY)*3600000);const mixedBagProcessingMinutes=(details.mixedBagPkgCountForAlert/MIX_BAG_PROCESS_RATE_PER_HOUR)*60;const finalCompletionTime=new Date(unloadCompletionTime.getTime()+mixedBagProcessingMinutes*60000);let status='onTime',spilloverMinutes=0;if(shiftKey){const shiftEnd=new Date(shiftBounds[shiftKey].e);const extendedEnd=new Date(shiftEnd.getTime()+SHIFT_EXTENSION_MINS*60000);if(finalCompletionTime>shiftEnd){status=(finalCompletionTime>extendedEnd)?'handover':'overtime';spilloverMinutes=Math.round((finalCompletionTime-shiftEnd)/60000)}}
+    const pVehicle={...details,id,eta,readyTime,finalCompletionTime,status,isPastETA:eta<now,spilloverMinutes};analysis.overall.totalLoad+=details.totalLoad;analysis.overall.totalMixedBags+=details.mixedBagPkgCountForAlert;analysis.overall.vehicleCount++;if(dayKey==='later'){analysis.later.v.push(pVehicle)}else if(shiftKey){analysis[dayKey].shifts[shiftKey].v.push(pVehicle)}}
+    analysis.today.shifts.A.endDate=todayShifts.A.e;analysis.today.shifts.B.endDate=todayShifts.B.e;analysis.today.shifts.C.endDate=todayShifts.C.e;analysis.tomorrow.shifts.A.endDate=tomorrowShifts.A.e;analysis.tomorrow.shifts.B.endDate=tomorrowShifts.B.e;analysis.tomorrow.shifts.C.endDate=tomorrowShifts.C.e;return analysis}
+    function triggerPostSyncNotification(storedData){if(!userSettings.notifications.enabled||!userSettings.notifications.onSync)return;const analysis=runShiftAnalysis(storedData);const{currentShift}=getShiftStatus();if(!currentShift)return;const currentShiftData=analysis.today.shifts[currentShift.name.charAt(6)];if(!currentShiftData)return;const vehicleCount=currentShiftData.v.length;const totalLoad=currentShiftData.v.reduce((a,c)=>a+c.totalLoad,0);const totalMixedBags=currentShiftData.v.reduce((a,c)=>a+c.mixedBagPkgCountForAlert,0);GM_notification({title:'📊 Sync Complete: Current Shift Briefing',text:`Current shift (${currentShift.name}) has ${vehicleCount} vehicles expected.\nTotal Load: ${totalLoad.toLocaleString()}\nTotal Mixed Bags: ${totalMixedBags.toLocaleString()}`,image:'https://www.google.com/s2/favicons?domain=delhivery.com',highlight:!1,onclick:()=>window.focus()})}
+    function startTickingCountdown(cell,vehicleData,vehicleId,arr){const arrival=new Date(vehicleData.liveArrivalTime||vehicleData.estimatedArrivalTime);if(!cell||!arrival||isNaN(arrival.getTime()))return;const timer=setInterval(()=>{const now=new Date();const diffMs=now-arrival;const remainingSeconds=Math.abs(diffMs)/1000;if(diffMs<0){const h=Math.floor(remainingSeconds/3600),m=Math.floor((remainingSeconds%3600)/60),sec=Math.floor(remainingSeconds%60);cell.innerHTML=`<span class="countdown-timer">${String(h).padStart(2,'0')}:${String(m).padStart(2,'0')}:${String(sec).padStart(2,'0')}</span>`;if(userSettings.notifications.enabled&&vehicleData.hasGps){const load=vehicleData.totalLoad||0;const origin=vehicleData.originFacility||'N/A';if(userSettings.notifications.on60min&&remainingSeconds<=3660&&remainingSeconds>3540&&!notifiedVehicles[vehicleId]?.notified60){if(!notifiedVehicles[vehicleId])notifiedVehicles[vehicleId]={};notifiedVehicles[vehicleId].notified60=true;GM_notification({title:`⏳ Approaching: ${vehicleId}`,text:`From: ${origin}\nETA: ~1 hour\nLoad: ${load.toLocaleString()}`,image:'https://www.google.com/s2/favicons?domain=delhivery.com',onclick:()=>window.focus()})}
+    if(userSettings.notifications.on30min&&remainingSeconds<=1860&&remainingSeconds>1740&&!notifiedVehicles[vehicleId]?.notified30){if(!notifiedVehicles[vehicleId])notifiedVehicles[vehicleId]={};notifiedVehicles[vehicleId].notified30=true;GM_notification({title:`🔥 Arriving Soon: ${vehicleId}`,text:`From: ${origin}\nETA: ~30 mins\nLoad: ${load.toLocaleString()}`,image:'https://www.google.com/s2/favicons?domain=delhivery.com',highlight:true,onclick:()=>window.focus()})}}}else{if(vehicleData.hasGps){cell.innerHTML=`<span class="arrived-text">Arrived<br><span class="arrived-ago">(${formatTimeSince(arrival)})</span></span>`;if(userSettings.notifications.enabled&&userSettings.notifications.onArrival&&!notifiedVehicles[vehicleId]?.notifiedArrived){if(!notifiedVehicles[vehicleId])notifiedVehicles[vehicleId]={};notifiedVehicles[vehicleId].notifiedArrived=true;const origin=vehicleData.originFacility||'N/A';GM_notification({title:`✅ Vehicle Arrived: ${vehicleId}`,text:`From: ${origin}\nReady for unloading.`,image:'https://www.google.com/s2/favicons?domain=delhivery.com',highlight:true,onclick:()=>window.focus()});setTimeout(()=>clearInterval(timer),60000)}}else{const elapsedMinutes=Math.floor(diffMs/60000);const h=Math.floor(elapsedMinutes/60);const m=elapsedMinutes%60;let agoText='';if(h>0)agoText+=`${h}h `;agoText+=`${m}m ago`;cell.innerHTML=`<span class="should-have-arrived-text">Should have arrived<br><span class="arrived-ago">(${agoText})</span></span>`}}},1000);arr.push(timer)}
     async function getCleanedVehicleData(){let storedData=JSON.parse(await GM_getValue('inboundVehicleData','{}'));const now=new Date();const autoClearThreshold=AUTO_CLEAR_GPS_VEHICLES_AFTER_HOURS*3600*1000;for(const vehicleNum in storedData){const vehicle=storedData[vehicleNum];if(vehicle.hasGps){const arrivalTime=new Date(vehicle.liveArrivalTime);if(now-arrivalTime>autoClearThreshold){delete storedData[vehicleNum]}}}await GM_setValue('inboundVehicleData',JSON.stringify(storedData));return storedData}
     async function showShiftInsightsModal(){document.getElementById('shift-insights-modal')?.remove();if(insightsHeaderInterval)clearInterval(insightsHeaderInterval);activeTimers.insights.forEach(clearInterval);activeTimers.insights=[];const storedData=await getCleanedVehicleData();const analysis=runShiftAnalysis(storedData);const modal=document.createElement('div');modal.id='shift-insights-modal';modal.innerHTML=`<div class="modal-overlay"></div><div class="modal-content"><div id="insights-header" class="modal-header"></div><div class="modal-body">${generateShiftPanels(analysis)}</div><div class="modal-footer"><p>Designed & Crafted by Rh. | for ⚡ Team Sonic - Hubli (for internal use only)</p></div></div><button class="close-btn">&times;</button>`;document.body.appendChild(modal);insightsHeaderInterval=setInterval(()=>updateDynamicHeader(modal.querySelector('#insights-header')),1000);updateDynamicHeader(modal.querySelector('#insights-header'));startShiftCountdownTimers(analysis);modal.querySelector('.close-btn').onclick=()=>{clearInterval(insightsHeaderInterval);activeTimers.insights.forEach(clearInterval);modal.remove()}}
     function generateShiftPanels(analysis) { let html = generateSummaryKPIs(analysis.overall); ['today', 'tomorrow'].forEach(dayKey => { const day = analysis[dayKey]; html += `<div class="day-forecast"><h2 class="day-header">${day.date}</h2><div class="day-panels-container">`; html += Object.values(day.shifts).map(s => { const isCompleted = new Date() > s.endDate && dayKey === 'today'; const completedClass = isCompleted ? 'shift-completed' : ''; const totalLoad = s.v.reduce((a, c) => a + c.totalLoad, 0); const totalMixedBags = s.v.reduce((a, c) => a + c.mixedBagPkgCountForAlert, 0); const shiftDurationHours = ((s.end < s.start ? s.end + 24 : s.end) - s.start); const shiftWorkHours = shiftDurationHours - SHIFT_BREAK_HOURS; const unloadCapacity = shiftWorkHours * HUB_UNLOAD_RATE_PER_HOUR; const mixedBagCapacity = shiftWorkHours * MIX_BAG_PROCESS_RATE_PER_HOUR; const unloadStress = unloadCapacity > 0 ? totalLoad / unloadCapacity : 0; const mixedBagStress = mixedBagCapacity > 0 ? totalMixedBags / mixedBagCapacity : 0; return `<div class="shift-panel ${completedClass}" style="border-left-color:${s.color};"> <div class="shift-header"><h3><strong>${s.name}</strong></h3><span class="shift-countdown" id="countdown-${dayKey}-${s.name.replace(' ', '')}"></span></div> <div class="shift-summary"><div><span>Total Load</span><strong>${totalLoad.toLocaleString()}</strong></div><div><span>Mixed Bags</span><strong>${totalMixedBags.toLocaleString()}</strong></div><div><span>Vehicles</span><strong>${s.v.length}</strong></div></div> <div class="capacity-bar-container" title="Load: ${totalLoad.toLocaleString()} / Capacity: ${unloadCapacity.toLocaleString()}"><div class="capacity-bar" style="width:${Math.min(unloadStress * 100, 100)}%; background-color:${unloadStress > 0.8 ? '#dc3545' : s.color};"></div><span>${(unloadStress * 100).toFixed(0)}% Unload Stress</span></div> <div class="capacity-bar-container" title="Mixed Bags: ${totalMixedBags.toLocaleString()} / Capacity: ${mixedBagCapacity.toLocaleString()}"><div class="capacity-bar" style="width:${Math.min(mixedBagStress * 100, 100)}%; background-color:${mixedBagStress > 0.8 ? '#fd7e14' : '#6c757d'};"></div><span>${(mixedBagStress * 100).toFixed(0)}% Mix Bag Stress</span></div> <div class="vehicle-list">${isCompleted ? '<p class="shift-completed-text">Shift Completed</p>' : (s.v.length > 0 ? s.v.map(generateVehicleCard).join('') : '<p class="no-vehicles">No vehicles projected.</p>')}</div> </div>`; }).join(''); html += `</div></div>`; }); return html; }
