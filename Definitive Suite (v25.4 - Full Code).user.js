@@ -1,8 +1,8 @@
 // ==UserScript==
-// @name         Team Sonic - Definitive Suite (v25.4 - Full Code)
+// @name         Team Sonic - Definitive Suite (v25.5 - Logic Fix)
 // @namespace    http://tampermonkey.net/
-// @version      25.4
-// @description  [FULL CODE] Complete script with Per-Center Configs, Operational Day Logic, Post-Shift Summaries, and robust ETA Subtext with Early/Late status.
+// @version      25.5
+// @description  [LOGIC FIX] Corrects Early/Late calculation by reading the correct STA column instead of the ETA column.
 // @author       Rh. | Team Sonic
 // @match        https://eye.delhivery.com/*
 // @connect      api.mapbox.com
@@ -78,22 +78,23 @@
     const initialize = async () => {
         try {
             // Load and migrate centers data
-            const savedCenters = JSON.parse(await GM_getValue('teamSonicCenters', '{}'));
+            let savedCenters = JSON.parse(await GM_getValue('teamSonicCenters', '{}'));
+            let needsMigration = false;
+
             if (Object.keys(savedCenters).length > 0) {
-                // Migration logic: check if a center is missing the new config structure
                 const firstCenterKey = Object.keys(savedCenters)[0];
                 if (savedCenters[firstCenterKey] && savedCenters[firstCenterKey].config === undefined) {
                     console.log('Team Sonic: Migrating old center data to new format.');
+                    needsMigration = true;
                     for (const id in savedCenters) {
                         savedCenters[id].isGpsEnabled = false; // Default to off during migration
                         savedCenters[id].config = JSON.parse(JSON.stringify(DEFAULT_CENTER_CONFIG)); // Deep copy
                     }
-                    await GM_setValue('teamSonicCenters', JSON.stringify(savedCenters));
-                    console.log('Team Sonic: Migration complete.');
                 }
                 centers = savedCenters;
             } else {
                  // Initialize with a default center if none exist
+                 needsMigration = true;
                 centers = {
                     'Hubli_Budarshingi_H': {
                         name: 'Hubli Budarshingi H',
@@ -102,8 +103,27 @@
                         config: JSON.parse(JSON.stringify(DEFAULT_CENTER_CONFIG))
                     }
                 };
-                await GM_setValue('teamSonicCenters', JSON.stringify(centers));
             }
+
+             // Migration for v25.5: Clear old data format
+            const oldData = await GM_getValue('inboundVehicleData_Hubli_Budarshingi_H');
+            if (oldData) {
+                const oldDataParsed = JSON.parse(oldData);
+                if (oldDataParsed[Object.keys(oldDataParsed)[0]]?.estimatedArrivalTime) {
+                     console.log('Team Sonic: Clearing old format data to prevent logic errors.');
+                     const allKeys = await GM_getValue('teamSonicCenters', '{}');
+                     for (const centerId in JSON.parse(allKeys)) {
+                         await GM_setValue(`inboundVehicleData_${centerId}`, '{}');
+                     }
+                     needsMigration = false; // Prevents re-saving centers if only data clear was needed
+                }
+            }
+
+            if (needsMigration) {
+                await GM_setValue('teamSonicCenters', JSON.stringify(centers));
+                console.log('Team Sonic: Migration complete.');
+            }
+
 
             const savedSettings = JSON.parse(await GM_getValue('teamSonicSettings', '{}'));
             if (savedSettings.notifications) {
@@ -322,7 +342,8 @@
             const syncInfo = lastSync ? `<b>${formatTimeAgo(lastSync)}</b> ago` : `No data synced yet.`;
             const storedData = await getCleanedVehicleData(centerId);
             const allVehicles = Object.entries(storedData).map(([number, data]) => ({ number, ...data }));
-            allVehicles.sort((a, b) => new Date(a.liveArrivalTime || a.estimatedArrivalTime) - new Date(b.liveArrivalTime || b.estimatedArrivalTime));
+            // Sort by the most accurate arrival time
+            allVehicles.sort((a, b) => new Date(a.liveArrivalTime || a.originalEta) - new Date(b.liveArrivalTime || b.originalEta));
 
             let tableHtml = allVehicles.length === 0
                 ? `<tr><td colspan="6" class="no-data-cell">No vehicle data for ${centerName}. Go to the "Inbound" tab to sync.</td></tr>`
@@ -414,7 +435,8 @@
             storedData[v.vehicleNumber] = {
                 hasGps: v.hasGps,
                 liveArrivalTime: v.hasGps ? v.liveArrivalTime.toISOString() : null,
-                estimatedArrivalTime: v.estimatedArrivalTime.toISOString(),
+                originalEta: v.originalEta.toISOString(),
+                sta: v.sta.toISOString(),
                 originFacility: v.loadData.originFacility,
                 totalLoad: v.loadData.totalLoad,
                 mixedBagPkgCountForAlert: v.loadData.mixedBagPkgCountForAlert,
@@ -433,32 +455,52 @@
     }
 
     function renderInboundUI(table, allVehicles) {
-        allVehicles.sort((a, b) => new Date(a.liveArrivalTime || a.estimatedArrivalTime) - new Date(b.liveArrivalTime || b.estimatedArrivalTime));
+        // Sort by the most accurate arrival time
+        allVehicles.sort((a, b) => new Date(a.liveArrivalTime || a.originalEta) - new Date(b.liveArrivalTime || b.originalEta));
         const tbody = table.querySelector('tbody');
         tbody.innerHTML = '';
         allVehicles.forEach(v => {
             tbody.appendChild(v.rowElement);
-            startTickingCountdown(v.etaCell, { ...v.data, ...v.loadData }, v.vehicleNumber, activeTimers.inbound);
+            // Pass the correct data to the countdown
+            const countdownData = {
+                liveArrivalTime: v.liveArrivalTime,
+                originalEta: v.originalEta,
+                sta: v.sta,
+                hasGps: v.hasGps,
+                ...v.loadData
+            };
+            startTickingCountdown(v.etaCell, countdownData, v.vehicleNumber, activeTimers.inbound);
         });
     }
 
     async function fetchAndProcessVehicleData(row) {
         try {
             const cells = row.cells;
+            // Ensure row has enough cells. 9 is the original, 10 with our Live KMs
             if (!cells || cells.length < 9) return null;
 
             const vehicleNumber = cells[0]?.querySelector('a')?.textContent.trim();
             if (!vehicleNumber) return null;
 
-            let etaString;
+            // --- LOGIC FIX: Read both ETA and STA columns ---
+            let originalEtaString;
             if (row.dataset.originalEta) {
-                etaString = row.dataset.originalEta;
+                originalEtaString = row.dataset.originalEta;
             } else {
-                etaString = cells[3]?.textContent?.trim().split('\n')[0];
-                if (etaString) row.dataset.originalEta = etaString;
+                originalEtaString = cells[3]?.textContent?.trim().split('\n')[0];
+                if (originalEtaString) row.dataset.originalEta = originalEtaString;
             }
 
-            if (!etaString) return null;
+            let staString;
+            if (row.dataset.originalSta) {
+                staString = row.dataset.originalSta;
+            } else {
+                staString = cells[4]?.textContent?.trim(); // Read STA from column 4
+                if (staString) row.dataset.originalSta = staString;
+            }
+
+            // If we can't get either date, skip row
+            if (!originalEtaString || !staString) return null;
 
             const mixedStr = cells[6]?.textContent || "";
             const loadData = {
@@ -467,7 +509,14 @@
                 mixedBagPkgCountForAlert: (mixedStr.match(/\((\d+)\)/) ? parseInt(mixedStr.match(/\((\d+)\)/)[1], 10) : 0)
             };
             const mapLink = cells[8]?.querySelector('a[href*="google.co.in/maps"]')?.href;
-            const vehicleDataObject = { vehicleNumber, loadData, estimatedArrivalTime: parseDateTimeString(etaString) };
+
+            // Store both times
+            const vehicleDataObject = {
+                vehicleNumber,
+                loadData,
+                originalEta: parseDateTimeString(originalEtaString), // The ETA from the website
+                sta: parseDateTimeString(staString) // The STA from the website
+            };
 
             if (!row.closest('table').querySelector('.live-kms-header')) {
                 row.closest('table').querySelector('thead tr').insertAdjacentHTML('beforeend', '<th class="live-kms-header">Live KMs</th>');
@@ -487,6 +536,7 @@
                     const color = liveData.distanceKm < 75 ? '#28a745' : liveData.distanceKm < 200 ? '#007bff' : '#343a40';
                     liveKmsCell.innerHTML = `<span style="font-weight:bold;color:${color};">${liveData.distanceKm.toFixed(1)} km</span>`;
                     vehicleDataObject.hasGps = true;
+                    // This is the new, calculated Live ETA
                     vehicleDataObject.liveArrivalTime = new Date(Date.now() + liveData.durationSeconds * 1000);
                 } catch (apiError) {
                     console.error(`API Failsafe for ${vehicleNumber}:`, apiError.message);
@@ -506,6 +556,7 @@
             row.classList.toggle('no-gps-row', !vehicleDataObject.hasGps);
             row.classList.toggle('gps-row', vehicleDataObject.hasGps);
 
+            // Return 'data' with all times for the countdown function
             return { ...vehicleDataObject, rowElement: row, etaCell: cells[3], data: vehicleDataObject };
         } catch (e) {
             console.error('Row Processing Error:', row, e);
@@ -634,7 +685,8 @@
 
         for (const [id, details] of Object.entries(vehicleData)) {
             if (!details) continue;
-            const eta = new Date(details.liveArrivalTime || details.estimatedArrivalTime);
+            // Use the most accurate ETA: live one if available, otherwise the original one from the site
+            const eta = new Date(details.liveArrivalTime || details.originalEta);
             if (isNaN(eta.getTime())) continue;
 
             const readyTime = new Date(eta.getTime() + (config.prepBufferMins * 60000));
@@ -825,8 +877,10 @@
     }
 
     function startTickingCountdown(cell, vehicleData, vehicleId, arr) {
-        const arrival = new Date(vehicleData.liveArrivalTime || vehicleData.estimatedArrivalTime);
-        const sta = new Date(vehicleData.estimatedArrivalTime);
+        // LOGIC FIX: 'arrival' is the time we count down to (Live ETA or Original ETA)
+        const arrival = new Date(vehicleData.liveArrivalTime || vehicleData.originalEta);
+        // LOGIC FIX: 'sta' is the Scheduled Time of Arrival, for comparison.
+        const sta = new Date(vehicleData.sta);
 
         if (!cell || !arrival || isNaN(arrival.getTime()) || !sta || isNaN(sta.getTime())) {
             if (cell) cell.innerHTML = 'Invalid Date';
@@ -841,6 +895,7 @@
 
                 let fullSubtext = '';
                 try {
+                    // LOGIC FIX: Compare 'arrival' (actual) vs 'sta' (scheduled)
                     const timeDiffFromStaMs = arrival - sta;
                     const isEarly = timeDiffFromStaMs < 0;
                     const diffFromStaMinutes = Math.abs(timeDiffFromStaMs / 60000);
@@ -912,8 +967,13 @@
         const now = new Date, autoClearThreshold = 36e5 * AUTO_CLEAR_GPS_VEHICLES_AFTER_HOURS;
         for (const vehicleNum in storedData) {
             const vehicle = storedData[vehicleNum];
+            // Clear vehicle if it has GPS and its live arrival time (or save time if no live) is too old
             if (vehicle.hasGps && (now - new Date(vehicle.liveArrivalTime || vehicle.savedAt)) > autoClearThreshold) {
                 delete storedData[vehicleNum];
+            }
+             // Data integrity check for old format
+            if (vehicle.estimatedArrivalTime) {
+                delete storedData[vehicleNum]; // Delete old format data
             }
         }
         await GM_setValue(`inboundVehicleData_${centerId}`, JSON.stringify(storedData));
@@ -951,7 +1011,10 @@
         });
     }
 
-    function parseDateTimeString(str) { return new Date(str.replace(",", " " + (new Date).getFullYear() + ",")); }
+    function parseDateTimeString(str) {
+        if (!str) return null;
+        return new Date(str.replace(",", " " + (new Date).getFullYear() + ","));
+    }
     function formatTimeAgo(iso) { const s = Math.round((new Date - new Date(iso)) / 1e3), m = Math.round(s / 60), h = Math.round(m / 60); return s < 60 ? s + "s" : m < 60 ? m + "m" : h < 24 ? h + "h" : (new Date(iso)).toLocaleDateString("en-IN"); }
     function formatTimeSince(date) { const diffMs = new Date - date, elapsedMinutes = Math.floor(diffMs / 6e4), h = Math.floor(elapsedMinutes / 60), m = elapsedMinutes % 60; let agoText = ""; h > 0 && (agoText += `${h}h `); agoText += `${m}m ago`; return agoText; }
 
