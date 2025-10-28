@@ -1,10 +1,11 @@
 // ==UserScript==
-// @name         Team Sonic - Definitive Suite (v25.5 - Logic Fix)
+// @name         Team Sonic - Definitive Suite (v25.11 - EyeSearch Panel)
 // @namespace    http://tampermonkey.net/
-// @version      25.5
-// @description  [LOGIC FIX] Corrects Early/Late calculation by reading the correct STA column instead of the ETA column.
+// @version      25.11
+// @description  [UI ENHANCEMENT] Redesigned the i-Search results panel with new title "EyeSearch", improved aesthetics, and signature. No functional changes.
 // @author       Rh. | Team Sonic
 // @match        https://eye.delhivery.com/*
+// @match        https://hq.delhivery.com/*
 // @connect      api.mapbox.com
 // @grant        GM_addStyle
 // @grant        GM_xmlhttpRequest
@@ -55,13 +56,18 @@
 
     const runSetup = () => {
         detectCurrentCenter();
-        setupGlobalViewerButton();
-        setupShiftInsightsButton();
+        setupISearchButton(); // Setup i-Search on all pages
 
-        const targetTable = document.querySelector('table.table_custom_1');
-        if (targetTable && window.location.href.includes('tab=inbound')) {
-            setupInboundDashboard(targetTable);
-            setupCenterManagementButton(targetTable);
+        // Only setup these buttons on eye.delhivery.com
+        if (!window.location.href.includes('hq.delhivery.com')) {
+            setupGlobalViewerButton();
+            setupShiftInsightsButton();
+
+            const targetTable = document.querySelector('table.table_custom_1');
+            if (targetTable && window.location.href.includes('tab=inbound')) {
+                setupInboundDashboard(targetTable);
+                setupCenterManagementButton(targetTable);
+            }
         }
     };
 
@@ -106,16 +112,19 @@
             }
 
              // Migration for v25.5: Clear old data format
-            const oldData = await GM_getValue('inboundVehicleData_Hubli_Budarshingi_H');
-            if (oldData) {
-                const oldDataParsed = JSON.parse(oldData);
-                if (oldDataParsed[Object.keys(oldDataParsed)[0]]?.estimatedArrivalTime) {
-                     console.log('Team Sonic: Clearing old format data to prevent logic errors.');
-                     const allKeys = await GM_getValue('teamSonicCenters', '{}');
-                     for (const centerId in JSON.parse(allKeys)) {
-                         await GM_setValue(`inboundVehicleData_${centerId}`, '{}');
-                     }
-                     needsMigration = false; // Prevents re-saving centers if only data clear was needed
+            const oldDataCheckKey = Object.keys(centers)[0];
+            if (oldDataCheckKey) {
+                const oldData = await GM_getValue(`inboundVehicleData_${oldDataCheckKey}`);
+                if (oldData) {
+                    const oldDataParsed = JSON.parse(oldData);
+                    const firstKey = Object.keys(oldDataParsed)[0];
+                    if (firstKey && oldDataParsed[firstKey]?.estimatedArrivalTime) {
+                         console.log('Team Sonic: Clearing old format data to prevent logic errors.');
+                         for (const centerId in centers) {
+                             await GM_setValue(`inboundVehicleData_${centerId}`, '{}');
+                         }
+                         needsMigration = false; // Prevents re-saving centers if only data clear was needed
+                    }
                 }
             }
 
@@ -140,7 +149,7 @@
     window.addEventListener('load', initialize, false);
 
     // --- CENTER DETECTION & MANAGEMENT ---
-
+    // ... All functions from detectCurrentCenter() to setupInboundDashboard() are unchanged ...
     function detectCurrentCenter() {
         const centerTitleElement = document.querySelector('.page_title.m-l-5.f-w-500');
         currentCenterId = centerTitleElement ? centerTitleElement.textContent.trim() : null;
@@ -323,7 +332,167 @@
         targetTable.parentNode.insertBefore(btnContainer, targetTable);
     }
 
+    // --- i-Search ---
+
+    function setupISearchButton() {
+        if (document.getElementById('team-sonic-isearch-button')) return;
+        const btn = document.createElement('button');
+        btn.id = 'team-sonic-isearch-button';
+        // REDESIGNED: Icon only, removed span
+        btn.innerHTML = `
+            <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round">
+                <circle cx="11" cy="11" r="8"></circle>
+                <line x1="21" y1="21" x2="16.65" y2="16.65"></line>
+            </svg>
+        `;
+        btn.onclick = handleISearchClick;
+        document.body.appendChild(btn);
+    }
+
+    async function handleISearchClick() {
+        let panelContentHtml = ''; // Use a different variable for content inside the panel
+        try {
+            const text = await navigator.clipboard.readText();
+            const { wbns, lrns, bags } = parseClipboardText(text);
+
+            const typeCount = (wbns.length > 0 ? 1 : 0) + (lrns.length > 0 ? 1 : 0) + (bags.length > 0 ? 1 : 0);
+            const totalItems = wbns.length + lrns.length + bags.length;
+
+            if (totalItems === 0) {
+                panelContentHtml = `<p>No valid WBNs, LRNs, or BAGs found in clipboard.</p>`;
+                showISearchPanel(panelContentHtml, true, 3000); // Show error for 3 sec
+            } else if (typeCount === 1) {
+                // Only one type found, open tab directly
+                let url = '';
+                let typeName = '';
+                if (wbns.length > 0) {
+                    url = `https://hq.delhivery.com/p/list/1?type=waybill&q=${wbns.join('%20')}`;
+                    typeName = `${wbns.length} WBN(s)`;
+                } else if (lrns.length > 0) {
+                    url = `https://hq.delhivery.com/p/list/1?type=lrn&q=${lrns.join('%20')}`;
+                    typeName = `${lrns.length} LRN(s)`;
+                } else if (bags.length > 0) {
+                    url = `https://hq.delhivery.com/bag/list/1?bs=${bags.join('+')}`;
+                    typeName = `${bags.length} BAG(s)`;
+                }
+                window.open(url, '_blank');
+                panelContentHtml = `<p>Found <strong>${typeName}</strong>. Opening tab...</p>`;
+                showISearchPanel(panelContentHtml, false, 3000); // Show success for 3 sec
+            } else {
+                // BUG FIX: Multiple types found. Show links to avoid popup blocker.
+                panelContentHtml = `<p>Found multiple types. Click to open:</p>
+                               <ul id="isearch-links">`;
+                if (wbns.length > 0) {
+                    const url = `https://hq.delhivery.com/p/list/1?type=waybill&q=${wbns.join('%20')}`;
+                    panelContentHtml += `<li><a href="${url}" target="_blank">Search ${wbns.length} WBN(s)</a></li>`;
+                }
+                if (lrns.length > 0) {
+                    const url = `https://hq.delhivery.com/p/list/1?type=lrn&q=${lrns.join('%20')}`;
+                    panelContentHtml += `<li><a href="${url}" target="_blank">Search ${lrns.length} LRN(s)</a></li>`;
+                }
+                if (bags.length > 0) {
+                    const url = `https://hq.delhivery.com/bag/list/1?bs=${bags.join('+')}`;
+                    panelContentHtml += `<li><a href="${url}" target="_blank">Search ${bags.length} BAG(s)</a></li>`;
+                }
+                panelContentHtml += `</ul>`;
+                showISearchPanel(panelContentHtml, false, 0); // Show indefinitely until closed
+            }
+
+        } catch (err) {
+            console.error("EyeSearch Error:", err);
+            panelContentHtml = `<p><strong>Error:</strong> Could not read clipboard. Check site permissions.</p>`;
+            showISearchPanel(panelContentHtml, true, 3000);
+        }
+    }
+
+
+    function parseClipboardText(text) {
+        const wbns = [];
+        const lrns = [];
+        const bags = [];
+
+        // Clean and split text by any whitespace (space, tab, newline) or comma
+        const tokens = text.trim().split(/[\s,\t\n]+/);
+
+        const containsLetter = /[a-zA-Z]/;
+        const containsNumber = /\d/;
+
+        for (const token of tokens) {
+            // Clean token of common non-alphanumeric prefixes/suffixes like quotes
+            const cleanToken = token.trim().replace(/^['"]|['"]$/g, '');
+            if (!cleanToken) continue;
+
+            const purelyNumeric = /^\d+$/.test(cleanToken);
+            const alphanumeric = /^[A-Z0-9]+$/i.test(cleanToken); // Checks for only letters and numbers
+            const length = cleanToken.length;
+
+            if (purelyNumeric) {
+                if (length >= 12) {
+                    wbns.push(cleanToken);
+                } else if (length >= 8 && length < 12) { // LOGIC UPDATE: LRN length constraint
+                    lrns.push(cleanToken);
+                }
+            } else if (alphanumeric && length >= 8 && containsLetter.test(cleanToken) && containsNumber.test(cleanToken)) {
+                // LOGIC UPDATE: Check alphanumeric, length >= 8, AND contains both letters and numbers for BAG
+                bags.push(cleanToken);
+            }
+            // Ignore anything else (contains symbols, wrong length, etc.)
+        }
+        return { wbns, lrns, bags };
+    }
+
+
+    function showISearchPanel(contentHtml, isError = false, timeout = 0) {
+        let panelEl = document.getElementById('team-sonic-isearch-panel');
+        if (!panelEl) {
+            panelEl = document.createElement('div');
+            panelEl.id = 'team-sonic-isearch-panel';
+            document.body.appendChild(panelEl);
+        }
+
+        // Construct the full panel HTML including header, content, and footer
+        panelEl.innerHTML = `
+            <div class="panel-header">
+                <h4><span class="eye">Eye</span><span class="search">Search</span> Results</h4>
+                ${timeout === 0 ? '<button id="isearch-close-btn">&times;</button>' : ''}
+            </div>
+            <div class="panel-content">
+                ${contentHtml}
+            </div>
+            <div class="panel-footer signature">
+                Designed & Crafted by Rh. | for ⚡ Team Sonic
+            </div>
+        `;
+
+        panelEl.className = 'show'; // Make it visible
+        panelEl.classList.toggle('glow-error', isError); // Add error glow if needed
+
+        // Auto-hide logic
+        if (timeout > 0) {
+            setTimeout(() => {
+                if (panelEl.classList.contains('show')) {
+                     panelEl.classList.remove('show');
+                }
+            }, timeout);
+        } else {
+            // Add close button listener if it exists (only when timeout is 0)
+            const closeBtn = panelEl.querySelector('#isearch-close-btn');
+            if (closeBtn) {
+                closeBtn.onclick = () => panelEl.classList.remove('show');
+            }
+            // Add listeners to links (still useful even without auto-close)
+            panelEl.querySelectorAll('#isearch-links a').forEach(link => {
+                 link.addEventListener('click', (e) => {
+                     // Optionally close after a short delay, even for new tabs
+                     // setTimeout(() => panelEl.classList.remove('show'), 300);
+                 });
+            });
+        }
+    }
+
+
     // --- DATA MODAL & LOGIC ---
+    // ... All functions from showDataModal() to getLiveRouteData() are unchanged ...
     async function showDataModal(initialCenterId) {
         document.getElementById('saved-data-modal')?.remove();
         activeTimers.modal.forEach(clearInterval);
@@ -1013,7 +1182,32 @@
 
     function parseDateTimeString(str) {
         if (!str) return null;
-        return new Date(str.replace(",", " " + (new Date).getFullYear() + ","));
+        // Improved date parsing to handle different formats potentially seen in STA
+        try {
+            // Attempt standard parsing first
+            let date = new Date(str.replace(",", " " + (new Date).getFullYear() + ","));
+            if (!isNaN(date.getTime())) return date;
+
+            // Fallback for formats like "Oct 23, 9:30 AM" without year
+             const parts = str.match(/(\w{3})\s+(\d{1,2}),?\s+(\d{1,2}):(\d{2})\s+(AM|PM)/i);
+             if (parts) {
+                 const currentYear = new Date().getFullYear();
+                 const monthIndex = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"].indexOf(parts[1]);
+                 let hours = parseInt(parts[3], 10);
+                 const minutes = parseInt(parts[4], 10);
+                 const ampm = parts[5].toUpperCase();
+
+                 if (ampm === "PM" && hours !== 12) hours += 12;
+                 if (ampm === "AM" && hours === 12) hours = 0; // Midnight case
+
+                 date = new Date(currentYear, monthIndex, parseInt(parts[2], 10), hours, minutes);
+                 if (!isNaN(date.getTime())) return date;
+             }
+
+        } catch (e) {
+            console.error("Team Sonic: Failed to parse date string:", str, e);
+        }
+        return null; // Return null if parsing fails
     }
     function formatTimeAgo(iso) { const s = Math.round((new Date - new Date(iso)) / 1e3), m = Math.round(s / 60), h = Math.round(m / 60); return s < 60 ? s + "s" : m < 60 ? m + "m" : h < 24 ? h + "h" : (new Date(iso)).toLocaleDateString("en-IN"); }
     function formatTimeSince(date) { const diffMs = new Date - date, elapsedMinutes = Math.floor(diffMs / 6e4), h = Math.floor(elapsedMinutes / 60), m = elapsedMinutes % 60; let agoText = ""; h > 0 && (agoText += `${h}h `); agoText += `${m}m ago`; return agoText; }
@@ -1167,6 +1361,144 @@
         .handover-item { display: flex; justify-content: space-between; font-size: 13px; padding: 4px 0; }
         .shift-completed-flag { font-weight: bold; color: #28a745; font-size: 14px; }
         .eta-subtext { font-size: 0.8em; color: #495057; font-weight: normal; }
+
+        /* --- i-Search Button Styles (Redesigned) --- */
+        #team-sonic-isearch-button {
+            position: fixed;
+            bottom: 20px;
+            right: 20px;
+            z-index: 9998;
+            background-color: rgba(60, 60, 60, 0.7); /* Translucent dark gray */
+            backdrop-filter: blur(8px); /* Blur effect */
+            color: #ffffff;
+            border: 1px solid rgba(255, 255, 255, 0.2);
+            border-radius: 50%; /* Make it circular */
+            cursor: pointer;
+            box-shadow: 0 4px 15px rgba(0,0,0,0.3);
+            transition: all 0.2s ease-out;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            width: 50px; /* Smaller size */
+            height: 50px; /* Smaller size */
+            animation: subtle-pulse 2.5s infinite ease-in-out;
+            padding: 0; /* Remove padding for icon centering */
+        }
+        #team-sonic-isearch-button:hover {
+            background-color: rgba(80, 80, 80, 0.9);
+            transform: scale(1.1); /* Slightly larger on hover */
+            box-shadow: 0 6px 20px rgba(0,0,0,0.4);
+            animation: none; /* Stop pulsing on hover */
+        }
+        #team-sonic-isearch-button svg {
+            color: #ffc107; /* Keep icon color */
+            width: 22px; /* Adjust icon size */
+            height: 22px;
+            margin: 0; /* Remove margin as span is gone */
+        }
+        /* Hide the span text */
+        #team-sonic-isearch-button span {
+            display: none;
+        }
+
+        /* --- EyeSearch Panel Styles (Redesigned) --- */
+        #team-sonic-isearch-panel {
+            position: fixed;
+            bottom: 85px; /* Position above button */
+            right: 20px;
+            z-index: 9997;
+            background-color: rgba(30, 30, 30, 0.85); /* Darker, more translucent */
+            backdrop-filter: blur(10px); /* Increased blur */
+            color: #e9ecef; /* Lighter text color */
+            padding: 0; /* Remove padding, handle internally */
+            border-radius: 10px; /* Slightly more rounded */
+            font-family: sans-serif;
+            font-size: 14px;
+            opacity: 0;
+            transform: translateY(10px); /* Start slightly lower */
+            transition: opacity 0.3s ease, transform 0.3s ease;
+            pointer-events: none;
+            box-shadow: 0 5px 20px rgba(0,0,0,0.4);
+            min-width: 280px; /* Slightly wider */
+            border: 1px solid rgba(255, 255, 255, 0.15);
+            overflow: hidden; /* Needed for border-radius on children */
+        }
+        #team-sonic-isearch-panel.show {
+            opacity: 1;
+            transform: translateY(0); /* Move up to final position */
+            pointer-events: auto;
+        }
+        #team-sonic-isearch-panel.glow-error {
+            background-color: rgba(220, 53, 69, 0.85); /* Red translucent */
+            animation: glow-error 0.5s 2;
+        }
+        .panel-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            padding: 10px 15px;
+            border-bottom: 1px solid rgba(255, 255, 255, 0.1);
+            background-color: rgba(0,0,0, 0.2); /* Subtle header background */
+        }
+        #team-sonic-isearch-panel h4 {
+            margin: 0;
+            font-size: 16px;
+            font-weight: bold;
+        }
+        #team-sonic-isearch-panel h4 span.eye { color: #dc3545; }
+        #team-sonic-isearch-panel h4 span.search { color: #ffffff; }
+        .panel-content {
+            padding: 15px;
+        }
+        #team-sonic-isearch-panel ul {
+            margin: 10px 0 0 0;
+            padding-left: 20px;
+        }
+        #team-sonic-isearch-panel li {
+            margin-bottom: 8px;
+        }
+        #team-sonic-isearch-panel a {
+            color: #ffca2c; /* Brighter yellow link */
+            text-decoration: none;
+            font-weight: bold;
+            transition: color 0.2s ease;
+        }
+        #team-sonic-isearch-panel a:hover {
+            color: #ffffff;
+            text-decoration: underline;
+        }
+        #isearch-close-btn {
+            background: none;
+            border: none;
+            color: #aaa;
+            font-size: 24px;
+            cursor: pointer;
+            padding: 0 5px;
+            line-height: 1;
+        }
+        #isearch-close-btn:hover {
+            color: white;
+        }
+        .panel-footer.signature {
+            padding: 8px 15px;
+            text-align: center;
+            font-size: 10px;
+            color: #adb5bd; /* Lighter gray for signature */
+            border-top: 1px solid rgba(255, 255, 255, 0.1);
+            background-color: rgba(0,0,0, 0.1); /* Subtle footer background */
+        }
+
+        /* Adjusted subtle pulse */
+        @keyframes subtle-pulse {
+            0% { box-shadow: 0 0 0 0 rgba(255, 193, 7, 0.3); }
+            70% { box-shadow: 0 0 0 8px rgba(255, 193, 7, 0); }
+            100% { box-shadow: 0 0 0 0 rgba(255, 193, 7, 0); }
+        }
+        @keyframes glow-error {
+            0% { box-shadow: 0 0 5px #dc3545; }
+            50% { box-shadow: 0 0 20px #dc3545; }
+            100% { box-shadow: 0 0 5px #dc3545; }
+        }
     `);
 })();
 
